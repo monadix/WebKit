@@ -371,7 +371,8 @@ void MediaPlayerPrivateGStreamer::load(const String& urlString)
 
     registerWebKitGStreamerElements();
 
-    if (!m_pipeline)
+    bool isNewPipeline = !m_pipeline;
+    if (isNewPipeline)
         createGSTPlayBin(url);
     syncOnClock(true);
     if (m_fillTimer.isActive())
@@ -380,6 +381,9 @@ void MediaPlayerPrivateGStreamer::load(const String& urlString)
     ASSERT(m_pipeline);
     setPlaybinURL(url);
     setViewportVisibility(player->viewportVisibility());
+    // The URI must be set before the suspension check can identify MediaStreams.
+    if (isNewPipeline)
+        managePlayerSuspend();
 
     GST_DEBUG_OBJECT(pipeline(), "preload: %s", convertEnumerationToString(m_preload).utf8());
     if (m_preload == MediaPlayer::Preload::None && !isMediaSource()) {
@@ -3690,9 +3694,6 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const URL& url)
             g_object_set(m_pipeline.get(), "audio-filter", scale, nullptr);
     }
 
-    // The URI and source are not set yet, so isMediaStreamPlayer() cannot identify this stream.
-    if (!isMediaStream)
-        managePlayerSuspend();
 #if ENABLE(MEDIA_TELEMETRY)
     MediaTelemetryReport::singleton().reportDrmInfo(getDrm());
     MediaTelemetryReport::singleton().reportPlaybackState(MediaTelemetryReport::AVPipelineState::Create);
