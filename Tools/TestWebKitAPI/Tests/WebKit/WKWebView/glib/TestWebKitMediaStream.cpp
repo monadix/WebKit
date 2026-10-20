@@ -72,11 +72,135 @@ static void testHiddenMutedMediaStream(WebViewTest* test, gconstpointer)
     g_assert_true(jsc_value_to_boolean(result));
 }
 
+static void testAudioOnlyMediaStreamPlayback(WebViewTest* test, gconstpointer)
+{
+    auto* settings = webkit_web_view_get_settings(test->webView());
+    webkit_settings_set_enable_media_stream(settings, TRUE);
+    webkit_settings_set_enable_webaudio(settings, TRUE);
+    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
+    test->loadHtml("<html><body></body></html>", nullptr);
+    test->waitUntilLoadFinished();
+
+    GUniqueOutPtr<GError> error;
+    auto* result = test->runAsyncJavaScriptFunctionInWorldAndWaitUntilFinished(
+        // A WebAudio destination provides a live audio-only MediaStream without touching any audio device.
+        "const context = new AudioContext();"
+        "await context.resume();"
+        "const destination = context.createMediaStreamDestination();"
+        "const gain = context.createGain();"
+        "gain.gain.value = 0;"
+        "const oscillator = context.createOscillator();"
+        "oscillator.connect(gain).connect(destination);"
+        "oscillator.start();"
+        "const audio = document.createElement('audio');"
+        "document.body.append(audio);"
+        // The resource selection task queues loadstart right before it calls loadResource(), which is
+        // what creates the GStreamer MediaStream pipeline and requests PLAYING. Awaiting the event
+        // therefore guarantees that the backend load has run, unlike a synchronous delay here, which
+        // would only postpone the queued load. Whether the element has already published readiness
+        // for that backend is exactly what differs between engines.
+        "const loadStarted = new Promise(resolve => audio.addEventListener('loadstart', () => resolve(true), { once: true }));"
+        "audio.srcObject = destination.stream;"
+        "try {"
+        "    const loaded = await Promise.race([loadStarted, new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
+        "    if (!loaded)"
+        "        return false;"
+        "    const playing = new Promise(resolve => audio.addEventListener('playing', () => resolve(true), { once: true }));"
+        "    const playPromise = audio.play();"
+        // Keep the page main thread busy: this lets backend work proceed while main-thread state
+        // notifications and the media-session admission continuation stay queued. It does not
+        // guarantee that the pipeline reaches PLAYING, nor any particular dispatch order.
+        "    const deadline = performance.now() + 1000;"
+        "    while (performance.now() < deadline) { }"
+        // Behavioral check on the element's exposed timeline only. MediaStream currentTime() is
+        // synthetic (monotonic time since play(), or the cached paused time), so a positive value
+        // here does not show that the backend started or rendered anything.
+        "    const timelineAdvanced = audio.currentTime > 0;"
+        "    const settled = await Promise.race([playPromise.then(() => true, () => false), new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
+        "    const notified = await Promise.race([playing, new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
+        "    return settled && notified && timelineAdvanced && !audio.paused && audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;"
+        "} finally {"
+        "    oscillator.stop();"
+        "    destination.stream.getTracks().forEach(track => track.stop());"
+        "    audio.srcObject = null;"
+        "    audio.remove();"
+        "    await context.close();"
+        "}", nullptr, nullptr, &error.outPtr());
+    g_assert_no_error(error.get());
+    g_assert_nonnull(result);
+    test->assertObjectIsDeletedWhenTestFinishes(G_OBJECT(result));
+    g_assert_true(jsc_value_to_boolean(result));
+}
+
+static void testAudioOnlyMediaStreamStartupPause(WebViewTest* test, gconstpointer)
+{
+    auto* settings = webkit_web_view_get_settings(test->webView());
+    webkit_settings_set_enable_media_stream(settings, TRUE);
+    webkit_settings_set_enable_webaudio(settings, TRUE);
+    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
+    test->loadHtml("<html><body></body></html>", nullptr);
+    test->waitUntilLoadFinished();
+
+    GUniqueOutPtr<GError> error;
+    auto* result = test->runAsyncJavaScriptFunctionInWorldAndWaitUntilFinished(
+        "const context = new AudioContext();"
+        "await context.resume();"
+        "const destination = context.createMediaStreamDestination();"
+        "const gain = context.createGain();"
+        "gain.gain.value = 0;"
+        "const oscillator = context.createOscillator();"
+        "oscillator.connect(gain).connect(destination);"
+        "oscillator.start();"
+        "const audio = document.createElement('audio');"
+        "document.body.append(audio);"
+        // Await loadstart so MediaPlayerPrivateGStreamer::load(MediaStreamPrivate&) has created the
+        // GStreamer MediaStream pipeline and requested PLAYING, then pause during that startup phase,
+        // while the element has not acknowledged playback by playing.
+        "const loadStarted = new Promise(resolve => audio.addEventListener('loadstart', () => resolve(true), { once: true }));"
+        "audio.srcObject = destination.stream;"
+        "try {"
+        "    const loaded = await Promise.race([loadStarted, new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
+        "    if (!loaded)"
+        "        return false;"
+        "    const playPromise = audio.play();"
+        // Keep the page main thread busy: this lets backend work proceed while main-thread state
+        // notifications and the media-session admission continuation stay queued, so the explicit
+        // pause below races an in-flight startup. It does not guarantee any particular pipeline state
+        // or dispatch order.
+        "    const deadline = performance.now() + 1000;"
+        "    while (performance.now() < deadline) { }"
+        // Behavioral check on the element's exposed timeline only. MediaStream currentTime() is
+        // synthetic (monotonic time since play(), or the cached paused time), so the value read here
+        // does not show that the backend started or rendered anything.
+        "    const timelineAdvanced = audio.currentTime > 0;"
+        "    audio.pause();"
+        "    const settled = await Promise.race([playPromise.then(() => true, () => true), new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
+        "    await new Promise(resolve => setTimeout(resolve, 500));"
+        "    const position = audio.currentTime;"
+        "    await new Promise(resolve => setTimeout(resolve, 300));"
+        // The element's exposed timeline must stay frozen while it is paused. This is the paused-time
+        // invariant of the media element, not evidence that a sink stopped.
+        "    return settled && timelineAdvanced && audio.paused && Math.abs(audio.currentTime - position) < 0.1;"
+        "} finally {"
+        "    oscillator.stop();"
+        "    destination.stream.getTracks().forEach(track => track.stop());"
+        "    audio.srcObject = null;"
+        "    audio.remove();"
+        "    await context.close();"
+        "}", nullptr, nullptr, &error.outPtr());
+    g_assert_no_error(error.get());
+    g_assert_nonnull(result);
+    test->assertObjectIsDeletedWhenTestFinishes(G_OBJECT(result));
+    g_assert_true(jsc_value_to_boolean(result));
+}
+
 void beforeAll()
 {
     // The GLib test runner normally disables the suspension behavior under test.
     g_setenv("WEBKIT_GST_ALLOW_PLAYBACK_OF_INVISIBLE_VIDEOS", "0", TRUE);
     WebViewTest::add("WebKitMediaStream", "hidden-muted-playback", testHiddenMutedMediaStream);
+    WebViewTest::add("WebKitMediaStream", "audio-only-playback", testAudioOnlyMediaStreamPlayback);
+    WebViewTest::add("WebKitMediaStream", "audio-only-startup-pause", testAudioOnlyMediaStreamStartupPause);
 }
 
 void afterAll()

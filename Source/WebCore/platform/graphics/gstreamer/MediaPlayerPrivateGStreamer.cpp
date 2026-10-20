@@ -1688,6 +1688,28 @@ bool MediaPlayerPrivateGStreamer::isMediaStreamPlayer() const
     return m_url.protocolIs("mediastream"_s);
 }
 
+bool MediaPlayerPrivateGStreamer::isAudioOnlyMediaStream() const
+{
+#if ENABLE(MEDIA_STREAM)
+    if (!isMediaStreamPlayer() || !m_streamPrivate)
+        return false;
+
+    bool hasAudioTrack = false;
+    bool hasVideoTrack = false;
+    m_streamPrivate->forEachTrack([&](auto& track) {
+        if (track.ended())
+            return;
+        if (track.isVideo())
+            hasVideoTrack = true;
+        else if (track.isAudio())
+            hasAudioTrack = true;
+    });
+    return hasAudioTrack && !hasVideoTrack;
+#else
+    return false;
+#endif
+}
+
 GstClockTime MediaPlayerPrivateGStreamer::gstreamerPositionFromSinks() const
 {
     gint64 gstreamerPosition = GST_CLOCK_TIME_NONE;
@@ -3134,7 +3156,7 @@ void MediaPlayerPrivateGStreamer::updateStates()
         GST_DEBUG_OBJECT(pipeline(), "Failure: State: %s, pending: %s", gst_state_get_name(m_currentState), gst_state_get_name(pending));
         // Change failed.
         return;
-    case GST_STATE_CHANGE_NO_PREROLL:
+    case GST_STATE_CHANGE_NO_PREROLL: {
         GST_DEBUG_OBJECT(pipeline(), "No preroll: State: %s, pending: %s", gst_state_get_name(m_currentState), gst_state_get_name(pending));
 
         // Live pipelines go in PAUSED without prerolling.
@@ -3153,14 +3175,20 @@ void MediaPlayerPrivateGStreamer::updateStates()
 
         m_networkState = MediaPlayer::NetworkState::Loading;
 
-        if (!isMediaStreamPlayer() && m_isLiveStream.value_or(false) && m_readyState < MediaPlayer::ReadyState::HaveEnoughData
-            && m_currentState >= GST_STATE_PAUSED) {
-            GST_DEBUG_OBJECT(pipeline(), "live stream reached %s", gst_state_get_name(m_currentState));
+        // Unlike MediaStream video, which reports readiness from triggerRepaint() once its first
+        // frame is available, an audio-only MediaStream has no frame to wait for. Reporting its
+        // readiness here also allows a play() that raced the pipeline startup to recover: a
+        // media-session admission completing before the first state notification can pause the
+        // pipeline while readyState is still HaveNothing.
+        bool canReportReadiness = isMediaStreamPlayer() ? isAudioOnlyMediaStream() : m_isLiveStream.value_or(false);
+        if (canReportReadiness && m_readyState < MediaPlayer::ReadyState::HaveEnoughData && m_currentState >= GST_STATE_PAUSED) {
+            GST_DEBUG_OBJECT(pipeline(), "%s reached %s", isMediaStreamPlayer() ? "audio-only MediaStream" : "live stream", gst_state_get_name(m_currentState));
             m_readyState = MediaPlayer::ReadyState::HaveEnoughData;
             if (player)
                 player->readyStateChanged();
         }
         break;
+    }
     default:
         GST_DEBUG_OBJECT(pipeline(), "Else : %d", getStateResult);
         break;
