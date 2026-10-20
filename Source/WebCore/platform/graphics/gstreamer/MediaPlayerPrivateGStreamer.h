@@ -140,6 +140,7 @@ public:
     void load(MediaStreamPrivate&) override;
 #endif
     bool isMediaStreamPlayer() const;
+    bool isAudioOnlyMediaStream() const;
     void cancelLoad() final;
     void prepareToPlay() final;
     void play() override;
