@@ -26,6 +26,32 @@
 
 #include "WebViewTest.h"
 #include <wtf/glib/GLibExtras.h>
+#include <wtf/glib/GRefPtr.h>
+
+static gboolean decidePolicyAllowAutoplay(WebKitWebView*, WebKitPolicyDecision* decision, WebKitPolicyDecisionType decisionType, gpointer)
+{
+    if (decisionType != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION)
+        return FALSE;
+
+    // The default website policy is ALLOW_WITHOUT_SOUND, which also gates WebAudio.
+    GRefPtr<WebKitWebsitePolicies> policies = adoptGRef(webkit_website_policies_new_with_policies("autoplay", WEBKIT_AUTOPLAY_ALLOW, nullptr));
+    webkit_policy_decision_use_with_policies(decision, policies.get());
+    return TRUE;
+}
+
+static void setUpAudioMediaStreamTest(WebViewTest* test)
+{
+    auto* settings = webkit_web_view_get_settings(test->webView());
+    webkit_settings_set_enable_media_stream(settings, TRUE);
+    webkit_settings_set_enable_webaudio(settings, TRUE);
+    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
+    // Website policies apply to the main resource navigation, so they must be set before loading.
+    g_signal_connect(test->webView(), "decide-policy", G_CALLBACK(decidePolicyAllowAutoplay), nullptr);
+    // An unmapped web view is not allowed to load media resources.
+    test->showInWindow();
+    test->loadHtml("<html><body></body></html>", "http://webkitgtk.org/");
+    test->waitUntilLoadFinished();
+}
 
 static void testHiddenMutedMediaStream(WebViewTest* test, gconstpointer)
 {
@@ -74,18 +100,12 @@ static void testHiddenMutedMediaStream(WebViewTest* test, gconstpointer)
 
 static void testAudioOnlyMediaStreamPlayback(WebViewTest* test, gconstpointer)
 {
-    auto* settings = webkit_web_view_get_settings(test->webView());
-    webkit_settings_set_enable_media_stream(settings, TRUE);
-    webkit_settings_set_enable_webaudio(settings, TRUE);
-    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
-    test->loadHtml("<html><body></body></html>", nullptr);
-    test->waitUntilLoadFinished();
+    setUpAudioMediaStreamTest(test);
 
     GUniqueOutPtr<GError> error;
     auto* result = test->runAsyncJavaScriptFunctionInWorldAndWaitUntilFinished(
         // A WebAudio destination provides a live audio-only MediaStream without touching any audio device.
         "const context = new AudioContext();"
-        "await context.resume();"
         "const destination = context.createMediaStreamDestination();"
         "const gain = context.createGain();"
         "gain.gain.value = 0;"
@@ -100,8 +120,12 @@ static void testAudioOnlyMediaStreamPlayback(WebViewTest* test, gconstpointer)
         // would only postpone the queued load. Whether the element has already published readiness
         // for that backend is exactly what differs between engines.
         "const loadStarted = new Promise(resolve => audio.addEventListener('loadstart', () => resolve(true), { once: true }));"
-        "audio.srcObject = destination.stream;"
         "try {"
+        // Bound the AudioContext calls so a setup or teardown defect reports the stage that stalled.
+        "    const resumed = await Promise.race([context.resume().then(() => true, () => false), new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))]);"
+        "    if (resumed !== true)"
+        "        throw new Error(`AudioContext resume ${resumed === false ? 'rejected' : 'timed out'}`);"
+        "    audio.srcObject = destination.stream;"
         "    const loaded = await Promise.race([loadStarted, new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
         "    if (!loaded)"
         "        return false;"
@@ -124,7 +148,9 @@ static void testAudioOnlyMediaStreamPlayback(WebViewTest* test, gconstpointer)
         "    destination.stream.getTracks().forEach(track => track.stop());"
         "    audio.srcObject = null;"
         "    audio.remove();"
-        "    await context.close();"
+        "    const closed = await Promise.race([context.close().then(() => true, () => false), new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))]);"
+        "    if (closed !== true)"
+        "        throw new Error(`AudioContext close ${closed === false ? 'rejected' : 'timed out'}`);"
         "}", nullptr, nullptr, &error.outPtr());
     g_assert_no_error(error.get());
     g_assert_nonnull(result);
@@ -134,17 +160,11 @@ static void testAudioOnlyMediaStreamPlayback(WebViewTest* test, gconstpointer)
 
 static void testAudioOnlyMediaStreamStartupPause(WebViewTest* test, gconstpointer)
 {
-    auto* settings = webkit_web_view_get_settings(test->webView());
-    webkit_settings_set_enable_media_stream(settings, TRUE);
-    webkit_settings_set_enable_webaudio(settings, TRUE);
-    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);
-    test->loadHtml("<html><body></body></html>", nullptr);
-    test->waitUntilLoadFinished();
+    setUpAudioMediaStreamTest(test);
 
     GUniqueOutPtr<GError> error;
     auto* result = test->runAsyncJavaScriptFunctionInWorldAndWaitUntilFinished(
         "const context = new AudioContext();"
-        "await context.resume();"
         "const destination = context.createMediaStreamDestination();"
         "const gain = context.createGain();"
         "gain.gain.value = 0;"
@@ -157,8 +177,12 @@ static void testAudioOnlyMediaStreamStartupPause(WebViewTest* test, gconstpointe
         // GStreamer MediaStream pipeline and requested PLAYING, then pause during that startup phase,
         // while the element has not acknowledged playback by playing.
         "const loadStarted = new Promise(resolve => audio.addEventListener('loadstart', () => resolve(true), { once: true }));"
-        "audio.srcObject = destination.stream;"
         "try {"
+        // Bound the AudioContext calls so a setup or teardown defect reports the stage that stalled.
+        "    const resumed = await Promise.race([context.resume().then(() => true, () => false), new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))]);"
+        "    if (resumed !== true)"
+        "        throw new Error(`AudioContext resume ${resumed === false ? 'rejected' : 'timed out'}`);"
+        "    audio.srcObject = destination.stream;"
         "    const loaded = await Promise.race([loadStarted, new Promise(resolve => setTimeout(() => resolve(false), 5000))]);"
         "    if (!loaded)"
         "        return false;"
@@ -186,7 +210,9 @@ static void testAudioOnlyMediaStreamStartupPause(WebViewTest* test, gconstpointe
         "    destination.stream.getTracks().forEach(track => track.stop());"
         "    audio.srcObject = null;"
         "    audio.remove();"
-        "    await context.close();"
+        "    const closed = await Promise.race([context.close().then(() => true, () => false), new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))]);"
+        "    if (closed !== true)"
+        "        throw new Error(`AudioContext close ${closed === false ? 'rejected' : 'timed out'}`);"
         "}", nullptr, nullptr, &error.outPtr());
     g_assert_no_error(error.get());
     g_assert_nonnull(result);
