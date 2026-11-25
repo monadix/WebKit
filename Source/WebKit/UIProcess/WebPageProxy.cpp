@@ -9526,6 +9526,11 @@ void WebPageProxy::frameWasRemoved(FrameIdentifier frameID, WebFrameProxy* frame
 
 void WebPageProxy::disconnectFramesFromPage()
 {
+    // A closed page keeps its focused frame alive through m_focusedFrame, which
+    // in turn keeps the frame's FrameProcess (and therefore the WebProcess)
+    // alive, so the process can never be terminated or cached. resetState()
+    // clears both frames for the same reason.
+    m_focusedFrame = nullptr;
     if (RefPtr mainFrame = std::exchange(m_mainFrame, nullptr))
         mainFrame->webProcessWillShutDown();
 }
