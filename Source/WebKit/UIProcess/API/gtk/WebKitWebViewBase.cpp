@@ -893,6 +893,13 @@ static void webkitWebViewBaseDispose(GObject* gobject)
     webView->priv->sleepDisabler = nullptr;
 #endif
     webView->priv->keyBindingTranslator.invalidate();
+
+    // Release the page here rather than waiting for finalize: the private
+    // struct is only destroyed then, so a view that is disposed but not yet
+    // finalized would keep the WebPageProxy, its frame and therefore its
+    // WebProcess alive, and that process can never be terminated.
+    webView->priv->pageProxy = nullptr;
+
     G_OBJECT_CLASS(webkit_web_view_base_parent_class)->dispose(gobject);
 }
 

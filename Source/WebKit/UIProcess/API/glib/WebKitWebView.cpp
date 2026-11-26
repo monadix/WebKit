@@ -1380,6 +1380,12 @@ static void webkitWebViewDispose(GObject* object)
     webView->priv->view->close();
 #endif
 
+    // WebKitWebResource holds a reference to the main WebFrameProxy, and that
+    // frame owns the FrameProcess that keeps this view's WebProcess alive.
+    // Dropping it here means a closed view stops pinning its renderer even
+    // before finalize.
+    webView->priv->mainResource = nullptr;
+
     G_OBJECT_CLASS(webkit_web_view_parent_class)->dispose(object);
 }
 
